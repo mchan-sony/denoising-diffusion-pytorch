@@ -14,15 +14,15 @@ from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 
 
-class Cityscapes(Dataset):
-    def __init__(self, image_size):
-        self.files = glob(
-            "/data/Cityscapes_processed/Cityscapes_h416/leftImg8bit/train/**/*.png"
-        )
+class ImageDataset(Dataset):
+    def __init__(self, config):
+        self.files = glob(config.data_path)
         self.tfm = transform.Compose(
             [
                 transform.ToTensor(),
-                transform.Resize([image_size, image_size], antialias=True),
+                transform.Resize(
+                    [config.image_size, config.image_size], antialias=True
+                ),
                 transform.RandomHorizontalFlip(),
             ]
         )
@@ -36,21 +36,28 @@ class Cityscapes(Dataset):
 
 
 def train(device, config):
-    dset = Cityscapes(config.image_size)
-    loader = DataLoader(dset, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers, pin_memory=True)
+    dset = ImageDataset(config)
+    print(f"Loaded dataset of size {len(dset)}.")
+    loader = DataLoader(
+        dset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
+        pin_memory=True,
+    )
 
     model = DataParallel(UViT(dim=64)).to(device)
+    model.train()
     if config.checkpoint:
         model.load_state_dict(torch.load(config.checkpoint))
         print(f"Loaded model checkpoint from {config.checkpoint}!")
-    model.train()
     diffusion = GaussianDiffusion(model, image_size=config.image_size)
 
     print(f"Starting training on {device} for {config.epochs} epochs!")
     optim = torch.optim.Adam(model.parameters(), lr=config.lr)
     pbar = tqdm(range(config.epochs))
     losses = []
-    for _ in pbar:
+    for epoch in pbar:
         for imgs in loader:
             optim.zero_grad()
             loss = diffusion(imgs.to(device))
@@ -58,12 +65,14 @@ def train(device, config):
             optim.step()
             pbar.set_description(f"Loss: {loss.item():.4f}")
             losses.append(loss.item())
+
+        if (epoch + 1) % 25 == 0 or (epoch + 1) == config.epochs:
+            torch.save(model.module.state_dict(), os.path.join(config.write_dir, "model.pt"))
+            config.checkpoint = os.path.join(config.write_dir, "model.pt")
+            sample(device, config)
     losses = torch.from_numpy(np.array(losses))
 
-    torch.save(model.state_dict(), os.path.join(config.write_dir, "model.pt"))
     torch.save(losses, os.path.join(config.write_dir, "loss.pt"))
-
-    config.checkpoint = os.path.join(config.write_dir, "model.pt")
 
 
 def sample(device, config):
@@ -83,6 +92,11 @@ if __name__ == "__main__":
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--sample", action="store_true")
     parser.add_argument("--checkpoint")
+    parser.add_argument(
+        "--data_path",
+        default="/data/matthew/dark_zurich/train/rgb_anon/train/night/**/*.png",
+        type=str,
+    )
     parser.add_argument("--write_dir", default="out", type=str)
     parser.add_argument("--epochs", default=200, type=int)
     parser.add_argument("--image_size", default=128, type=int)
