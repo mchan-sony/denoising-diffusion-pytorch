@@ -583,6 +583,10 @@ class GaussianDiffusion(nn.Module):
         self.min_snr_loss_weight = min_snr_loss_weight
         self.min_snr_gamma = min_snr_gamma
 
+    def low_pass_filter(self, input, scale):
+        down = F.interpolate(input, scale_factor=1./scale, mode='bilinear', antialias=True)
+        return F.interpolate(down, scale_factor=scale, mode='bilinear', antialias=True)
+
     @property
     def device(self):
         return next(self.model.parameters()).device
@@ -630,7 +634,7 @@ class GaussianDiffusion(nn.Module):
         return model_mean + sqrt(model_variance) * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape):
+    def p_sample_loop(self, condition, scale, shape):
         batch = shape[0]
 
         img = torch.randn(shape, device = self.device)
@@ -640,14 +644,19 @@ class GaussianDiffusion(nn.Module):
             times = steps[i]
             times_next = steps[i + 1]
             img = self.p_sample(img, times, times_next)
+            if not condition is None:
+                noisy_condition = self.q_sample(condition, times)[0]
+                img = img - self.low_pass_filter(img, scale) + self.low_pass_filter(noisy_condition, scale)
 
         img.clamp_(-1., 1.)
         img = unnormalize_to_zero_to_one(img)
         return img
 
     @torch.no_grad()
-    def sample(self, batch_size = 16):
-        return self.p_sample_loop((batch_size, self.channels, self.image_size, self.image_size))
+    def sample(self, condition = None, scale = None, batch_size = 16):
+        if not condition is None:
+            condition = normalize_to_neg_one_to_one(condition).repeat([batch_size, 1, 1, 1])
+        return self.p_sample_loop(condition, scale, (batch_size, self.channels, self.image_size, self.image_size))
 
     # training related functions - noise prediction
 

@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from glob import glob
 from pathlib import Path
 
@@ -54,6 +55,7 @@ def train(device, config):
     diffusion = GaussianDiffusion(model, image_size=config.image_size)
 
     print(f"Starting training on {device} for {config.epochs} epochs!")
+    # TODO: Add cosine annealing.
     optim = torch.optim.Adam(model.parameters(), lr=config.lr)
     pbar = tqdm(range(config.epochs))
     losses = []
@@ -67,12 +69,15 @@ def train(device, config):
             losses.append(loss.item())
 
         if (epoch + 1) % 25 == 0 or (epoch + 1) == config.epochs:
-            torch.save(model.module.state_dict(), os.path.join(config.write_dir, "model.pt"))
-            config.checkpoint = os.path.join(config.write_dir, "model.pt")
+            torch.save(
+                model.module.state_dict(),
+                os.path.join(config.write_dir, f"model_{config.id}.pt"),
+            )
+            config.checkpoint = os.path.join(config.write_dir, f"model_{config.id}.pt")
             sample(device, config)
     losses = torch.from_numpy(np.array(losses))
 
-    torch.save(losses, os.path.join(config.write_dir, "loss.pt"))
+    torch.save(losses, os.path.join(config.write_dir, f"loss_{config.id}.pt"))
 
 
 def sample(device, config):
@@ -81,14 +86,20 @@ def sample(device, config):
     model.load_state_dict(torch.load(config.checkpoint))
     model.eval()
     diffusion = GaussianDiffusion(model, image_size=config.image_size)
-    samples = diffusion.sample(batch_size=8)
+
+    dset = ImageDataset(config)
+    condition = dset[np.random.randint(0, len(dset))].unsqueeze(0).to(device)
+    samples = diffusion.sample(condition, scale=config.scale, batch_size=8)
+    out = torch.concat([condition, samples])
     save_image(
-        make_grid(samples.detach().cpu()), os.path.join(config.write_dir, "samples.png")
+        make_grid(out.detach().cpu().flip(dims=[1]), nrow=len(out)),
+        os.path.join(config.write_dir, f"samples_{config.id}.png"),
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--id", default=str(time.time()), type=str)
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--sample", action="store_true")
     parser.add_argument("--checkpoint")
@@ -103,8 +114,9 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--lr", default=1e-4, type=float)
+    parser.add_argument("--scale", default=32, type=int)
     config = parser.parse_args()
-    print(config)
+    print(vars(config))
 
     write_dir = Path(config.write_dir).mkdir(exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
